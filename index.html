@@ -929,7 +929,7 @@ function startDraw(latlng){
   if(!active){ hint('Сначала выбери страну-агрессора (😡)'); return; }
   drawing=true; pts=[latlng];
   if(tempLine) map.removeLayer(tempLine);
-  tempLine=L.polyline(pts,{color:state[active].color,weight:3,dashArray:'6 4'}).addTo(map);
+  tempLine=L.polyline(pts,{color:state[active].color,weight:4,opacity:.9}).addTo(map);
 }
 function extendDraw(latlng){
   if(!drawing) return;
@@ -987,16 +987,36 @@ function feat(name){ return {type:'Feature',properties:{},geometry:state[name].g
 function isPoly(g){ return g && (g.type==='Polygon'||g.type==='MultiPolygon'); }
 function clean(g){ try{ return turf.cleanCoords({type:'Feature',geometry:g}).geometry; }catch(e){ return g; } }
 
-// обводим область -> берём ВСЮ сушу внутри неё (со всех стран, кроме агрессора).
-// Море исключается само (его нет ни в одной стране). Пробелов не остаётся.
+// сглаживание замкнутого контура (Chaikin, циклически) — форма одинаковая хоть быстро, хоть медленно
+function chaikinClosed(ring, iters){
+  let p=ring.slice(0,-1);              // убрать дублирующую последнюю точку
+  if(p.length<3) return ring;
+  for(let it=0; it<iters; it++){
+    const out=[];
+    for(let i=0;i<p.length;i++){
+      const a=p[i], b=p[(i+1)%p.length];
+      out.push([a[0]*0.75+b[0]*0.25, a[1]*0.75+b[1]*0.25]);
+      out.push([a[0]*0.25+b[0]*0.75, a[1]*0.25+b[1]*0.75]);
+    }
+    p=out;
+  }
+  p.push(p[0]);                        // замкнуть
+  return p;
+}
+
+// обводим область -> берём сушу одной страны-жертвы. Форма не зависит от скорости рисования.
 function finishDraw(){
   if(tempLine){ map.removeLayer(tempLine); tempLine=null; }
   if(!active || pts.length<3){ pts=[]; return; }
-  const coords=pts.map(p=>[p.lng,p.lat]); coords.push(coords[0]);
+  let coords=pts.map(p=>[p.lng,p.lat]); coords.push(coords[0]);
   let shape;
   try{
     shape=turf.polygon([coords]);
-    shape=turf.simplify(shape,{tolerance:0.008,highQuality:false}); // стабильнее + меньше точек
+    // нормализуем плотность точек -> быстрый и медленный штрих дают одинаковую фигуру
+    shape=turf.simplify(shape,{tolerance:0.012,highQuality:false});
+    // сглаживаем углы -> плавная непрерывная граница независимо от скорости
+    let ring=chaikinClosed(shape.geometry.coordinates[0], 2);
+    shape=turf.polygon([ring]);
   }catch(e){ pts=[]; return; }
   pts=[];
 
