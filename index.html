@@ -924,7 +924,6 @@ let drawing=false, pts=[], tempLine=null;
 function startDraw(latlng){
   if(mode!=='draw') return;
   if(!active){ document.getElementById('hint').textContent='Сначала выбери страну (режим «Выбрать страну»).'; return; }
-  ensureAudio();                 // «будим» звук в момент жеста (нужно для iPad)
   drawing=true; pts=[latlng];
   if(tempLine) map.removeLayer(tempLine);
   tempLine=L.polyline(pts,{color:state[active].color,weight:3,dashArray:'6 4'}).addTo(map);
@@ -975,46 +974,12 @@ cont.addEventListener('pointerup',pointerEnd);
 cont.addEventListener('pointercancel',pointerEnd);
 
 // ---- военная барабанная дробь (синтез, без файлов — работает офлайн) ----
-let audioCtx=null;
-function ensureAudio(){
-  try{
-    if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
-    if(audioCtx.state==='suspended') audioCtx.resume();
-  }catch(e){}
-}
-function playDrumroll(durSec){
-  if(!audioCtx) return;
-  const ctx=audioCtx, t0=ctx.currentTime, sr=ctx.sampleRate;
-  const master=ctx.createGain(); master.gain.value=0.5; master.connect(ctx.destination);
-  const nbuf=ctx.createBuffer(1, Math.floor(sr*0.05), sr);
-  const d=nbuf.getChannelData(0);
-  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;   // белый шум = «щётка» малого барабана
-  const step=0.05, hits=Math.max(1,Math.floor(durSec/step));
-  for(let i=0;i<hits;i++){
-    const t=t0+i*step;
-    const src=ctx.createBufferSource(); src.buffer=nbuf;
-    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1900; bp.Q.value=0.8;
-    const g=ctx.createGain();
-    const amp=0.18+0.27*(i/hits);                        // дробь нарастает
-    g.gain.setValueAtTime(0,t);
-    g.gain.linearRampToValueAtTime(amp,t+0.003);
-    g.gain.exponentialRampToValueAtTime(0.0008,t+0.045);
-    src.connect(bp); bp.connect(g); g.connect(master);
-    src.start(t); src.stop(t+0.05);
-  }
-  const t=t0+durSec;                                     // финальный акцент
-  const src=ctx.createBufferSource(); src.buffer=nbuf;
-  const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1100; bp.Q.value=0.5;
-  const g=ctx.createGain(); g.gain.setValueAtTime(0.8,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.45);
-  src.connect(bp); bp.connect(g); g.connect(master);
-  src.start(t); src.stop(t+0.5);
-}
-
 function feat(name){ return {type:'Feature',properties:{},geometry:state[name].geometry}; }
 function isPoly(g){ return g && (g.type==='Polygon'||g.type==='MultiPolygon'); }
 function clean(g){ try{ return turf.cleanCoords({type:'Feature',geometry:g}).geometry; }catch(e){ return g; } }
 
-// штрих от границы до границы -> зона захвата строго по земле ОДНОЙ соседней страны
+// обводим область -> берём ВСЮ сушу внутри неё (со всех стран, кроме агрессора).
+// Море исключается само (его нет ни в одной стране). Пробелов не остаётся.
 function finishDraw(){
   if(tempLine){ map.removeLayer(tempLine); tempLine=null; }
   if(!active || pts.length<3){ pts=[]; return; }
@@ -1026,49 +991,54 @@ function finishDraw(){
   }catch(e){ pts=[]; return; }
   pts=[];
 
-  // выбираем ОДНУ страну-жертву: с чьей землёй штрих пересекается сильнее всего.
-  // intersect клипует зону строго по её границам -> в море не заходит и третьи страны не трогает.
-  let target=null, best=0, captured=null;
+  const pieces=[]; let region=null;             // region = вся захватываемая суша
   Object.keys(state).forEach(name=>{
     if(name===active) return;
     let inter;
     try{ inter=turf.intersect(shape, feat(name)); }catch(e){ return; }
     if(inter && isPoly(inter.geometry)){
-      let a=0; try{ a=turf.area(inter); }catch(e){}
-      if(a>best){ best=a; target=name; captured=inter; }
+      pieces.push({name, inter});
+      try{ region = region ? (turf.union(region, inter)||region) : inter; }catch(e){ if(!region) region=inter; }
     }
   });
-  if(!target || !captured){
-    document.getElementById('hint').textContent='Веди линию по земле соседней страны (в море захватывать нельзя).';
+  if(!region || !isPoly(region.geometry)){
+    document.getElementById('hint').textContent='Веди линию по земле (в море захватывать нельзя).';
     return;
   }
-  animateSweep(captured, state[active].color, ()=>commitCapture(target, captured));
+  animateSweep(region, state[active].color, ()=>commitCapture(pieces, region));
 }
 
-// анимация: цвет наступающего разливается ОТ его старой границы К новой линии
-function animateSweep(pocket, color, done){
-  const atkOld=feat(active);
-  let localAtk=atkOld;
+// анимация: область сразу становится НЕЙТРАЛЬНОЙ (цвет соперника убираем),
+// затем её сплошь заливает цвет агрессора, наступая от его границы кратчайшим путём.
+function animateSweep(region, color, done){
+  // нейтральная подложка поверх стран — прячет цвет соперника на захватываемой земле
+  const mask=L.geoJSON(region,{style:{weight:0,fillColor:'#eceef2',fillOpacity:1,stroke:false}}).addTo(map);
+  // откуда наступать: локальный кусок границы агрессора рядом с областью
+  let localAtk=feat(active), adjacent=true;
   try{
-    const bb=turf.bbox(pocket), pad=0.6;
-    const c=turf.bboxClip(atkOld,[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]);
-    if(isPoly(c.geometry)) localAtk=c;
-  }catch(e){}
-  const pb=turf.bbox(pocket);
+    const bb=turf.bbox(region), pad=0.6;
+    const c=turf.bboxClip(feat(active),[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]);
+    if(isPoly(c.geometry)) localAtk=c; else adjacent=false;
+  }catch(e){ adjacent=false; }
+  const pb=turf.bbox(region);
   const maxD=Math.max(turf.distance([pb[0],pb[1]],[pb[2],pb[3]],{units:'kilometers'}),25);
-  const flood=L.geoJSON(null,{style:{color:color,weight:0,fillColor:color,fillOpacity:0.85,stroke:false}}).addTo(map);
-  const t0=performance.now(), dur=4500; let lastStep=-1, fin=false;   // в 5 раз медленнее — войска занимают территорию
-  playDrumroll(dur/1000);                        // военная барабанная дробь на время захвата
-  function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} done(); }
+  const flood=L.geoJSON(null,{style:{weight:0,fillColor:color,fillOpacity:1,stroke:false}}).addTo(map);
+  const t0=performance.now(), dur=4500; let lastStep=-1, fin=false;
+  function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} try{map.removeLayer(mask);}catch(e){} done(); }
   (function step(t){
     if(fin) return;
     const k=Math.min(1,(t-t0)/dur);
-    const ek=1-Math.pow(1-k,2);                 // плавный разгон фронта
+    const ek=1-Math.pow(1-k,2);
     const s=Math.floor(k*60);
     if(s!==lastStep){ lastStep=s;
       try{
-        const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'});
-        const band=g?turf.intersect(pocket,g):null;
+        let band;
+        if(adjacent){
+          const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'}); // фронт от границы агрессора
+          band=g?turf.intersect(region,g):null;
+        } else {
+          band=region; flood.setStyle({fillOpacity:ek});                  // не примыкает — просто проявляем
+        }
         flood.clearLayers(); if(band) flood.addData(band);
       }catch(e){}
     }
@@ -1077,24 +1047,22 @@ function animateSweep(pocket, color, done){
   setTimeout(finish, dur+60);   // фиксация гарантированно, даже если анимация прервётся
 }
 
-// фиксируем: наступающий поглощает зону, жертва теряет ровно её.
-// Применяем только если ОБЕ операции удались — иначе ход отменяется целиком (нет белых «ничьих» зон).
-function commitCapture(target, captured){
+// фиксируем: агрессор поглощает всю область, каждая задетая страна теряет свою часть. Атомарно по агрессору.
+function commitCapture(pieces, region){
   let newAtk=null;
-  try{ const m=turf.union(feat(active),captured); if(m&&isPoly(m.geometry)) newAtk=clean(m.geometry); }catch(e){}
+  try{ const m=turf.union(feat(active),region); if(m&&isPoly(m.geometry)) newAtk=clean(m.geometry); }catch(e){}
   if(!newAtk){ document.getElementById('hint').textContent='Не получилось присоединить зону — попробуй обвести иначе.'; return; }
-
-  let newTgt='fail';
-  try{
-    const d=turf.difference(feat(target),captured);
-    if(d===null) newTgt=null;                       // страна поглощена полностью
-    else if(isPoly(d.geometry)) newTgt=clean(d.geometry);
-  }catch(e){}
-  if(newTgt==='fail'){ document.getElementById('hint').textContent='Не получилось отрезать зону у соседа — попробуй обвести иначе.'; return; }
-
+  const updates=[];
+  for(const p of pieces){
+    try{
+      const d=turf.difference(feat(p.name), region);
+      if(d===null) updates.push([p.name,null]);                 // страна поглощена полностью
+      else if(isPoly(d.geometry)) updates.push([p.name, clean(d.geometry)]);
+    }catch(e){}                                                 // не вышло у одной — просто пропускаем её
+  }
   snapshot();
   state[active].geometry=newAtk;
-  if(newTgt===null) delete state[target]; else state[target].geometry=newTgt;
+  for(const u of updates){ if(u[1]===null) delete state[u[0]]; else state[u[0]].geometry=u[1]; }
   render(); save();
 }
 
