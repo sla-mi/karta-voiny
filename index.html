@@ -973,7 +973,13 @@ cont.addEventListener('pointerdown',ev=>{
   startDraw(toLatLng(ev));
 });
 cont.addEventListener('pointermove',ev=>{
-  if(drawing && !gesturing && activePointers.size===1){ ev.preventDefault(); extendDraw(toLatLng(ev)); }
+  if(drawing && !gesturing && activePointers.size===1){
+    ev.preventDefault();
+    // при быстром движении берём ВСЕ промежуточные точки, иначе линия рвётся
+    const evs = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null;
+    if(evs && evs.length){ for(const e of evs) extendDraw(toLatLng(e)); }
+    else extendDraw(toLatLng(ev));
+  }
 });
 function pointerEnd(ev){
   activePointers.delete(ev.pointerId);
@@ -1019,52 +1025,45 @@ function finishDraw(){
     document.getElementById('hint').textContent='Веди линию по земле соседней страны (в море захватывать нельзя).';
     return;
   }
-  startCapture(target, deSpike(raw));   // deSpike убирает тонкие отростки
+  startCapture(target, raw);   // raw строго внутри страны-жертвы — соседей не трогаем
 }
 
-// убирает тонкие «отростки» (морфологическое открытие), сохраняя край у границы агрессора без зазора
-function deSpike(raw){
-  const OPEN=10;
-  let opened=null;
-  try{
-    let g=turf.buffer(raw,-OPEN,{units:'kilometers'});
-    if(g && isPoly(g.geometry)){ g=turf.buffer(g,OPEN+0.5,{units:'kilometers'}); if(g && isPoly(g.geometry)) opened=g; }
-  }catch(e){}
-  if(!opened) return raw;                    // узкий захват целиком — оставляем как нарисовано
-  try{
-    const bb=turf.bbox(raw), pad=0.6;
-    const localAgg=turf.bboxClip(feat(active),[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]);
-    const aggBuf=isPoly(localAgg.geometry)?turf.buffer(localAgg,OPEN+4,{units:'kilometers'}):null;
-    const nearAgg=aggBuf?turf.intersect(raw,aggBuf):null;   // полоса вдоль агрессора — вернуть полностью
-    if(nearAgg && isPoly(nearAgg.geometry)){
-      const u=turf.union(opened,nearAgg);
-      if(u && isPoly(u.geometry)) return u;
-    }
-  }catch(e){}
-  return opened;
+// разбить геометрию на крупные куски и мелкие осколки по площади (км²)
+function splitBySize(geom, minKm2){
+  const polys = geom.type==='Polygon' ? [geom.coordinates] : (geom.type==='MultiPolygon' ? geom.coordinates : []);
+  const big=[], tiny=[], min=minKm2*1e6;
+  for(const c of polys){
+    let a=0; try{ a=turf.area({type:'Polygon',coordinates:c}); }catch(e){}
+    (a>=min?big:tiny).push(c);
+  }
+  const pack=arr=> !arr.length ? null : (arr.length===1?{type:'Polygon',coordinates:arr[0]}:{type:'MultiPolygon',coordinates:arr});
+  return {big:pack(big), tiny:pack(tiny)};
 }
 
-// захват: сначала убираем землю у соперников (область становится «ничьей»),
-// затем по ней наступает ТОЧНЫЙ цвет агрессора кратчайшим путём, и в конце земля присоединяется к агрессору.
+// захват одной страны: жертва теряет область; мелкие осколки жертвы тоже отходят агрессору (без островков),
+// затем точный цвет агрессора наступает кратчайшим путём.
 function startCapture(target, region){
-  // сначала убеждаемся, что агрессор сможет поглотить область
+  let dRaw='fail';
+  try{ dRaw=turf.difference(feat(target),region); }catch(e){}
+  if(dRaw==='fail'){ document.getElementById('hint').textContent='Не получилось отрезать зону — попробуй обвести иначе.'; return; }
+
+  let newTgt=null, absorbed=region;
+  if(dRaw && isPoly(dRaw.geometry)){
+    const sp=splitBySize(dRaw.geometry, 8);            // <8 км² у жертвы = осколок → агрессору
+    newTgt=sp.big;
+    if(sp.tiny){ try{ const u=turf.union(region, {type:'Feature',properties:{},geometry:sp.tiny}); if(u&&isPoly(u.geometry)) absorbed=u; }catch(e){} }
+  } // dRaw===null -> жертва поглощена целиком (newTgt=null)
+
   let newAtk=null;
-  try{ const m=turf.union(feat(active),region); if(m&&isPoly(m.geometry)) newAtk=clean(m.geometry); }catch(e){}
+  try{ const m=turf.union(feat(active),absorbed); if(m&&isPoly(m.geometry)) newAtk=clean(m.geometry); }catch(e){}
   if(!newAtk){ document.getElementById('hint').textContent='Не получилось присоединить зону — попробуй обвести иначе.'; return; }
-  let newTgt='fail';
-  try{
-    const d=turf.difference(feat(target),region);
-    if(d===null) newTgt=null;                                   // страна поглощена полностью
-    else if(isPoly(d.geometry)) newTgt=clean(d.geometry);
-  }catch(e){}
-  if(newTgt==='fail'){ document.getElementById('hint').textContent='Не получилось отрезать зону у соседа — попробуй обвести иначе.'; return; }
 
   snapshot();
-  // ФАЗА 1: снимаем землю у жертвы (агрессора пока не трогаем) — область освобождается
-  if(newTgt===null) delete state[target]; else state[target].geometry=newTgt;
+  // ФАЗА 1: жертва теряет землю (агрессора пока не трогаем) — область освобождается
+  if(newTgt===null) delete state[target]; else state[target].geometry=clean(newTgt);
   render();
-  // ФАЗА 2: фронт точного цвета агрессора заполняет область, затем земля становится частью агрессора
-  animateFill(region, state[active].color, ()=>{
+  // ФАЗА 2: точный цвет агрессора заполняет область, затем земля присоединяется к агрессору
+  animateFill(absorbed, state[active].color, ()=>{
     state[active].geometry=newAtk; render(); save();
   });
 }
