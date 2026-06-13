@@ -924,6 +924,7 @@ let drawing=false, pts=[], tempLine=null;
 function startDraw(latlng){
   if(mode!=='draw') return;
   if(!active){ document.getElementById('hint').textContent='Сначала выбери страну (режим «Выбрать страну»).'; return; }
+  ensureAudio();                 // «будим» звук в момент жеста (нужно для iPad)
   drawing=true; pts=[latlng];
   if(tempLine) map.removeLayer(tempLine);
   tempLine=L.polyline(pts,{color:state[active].color,weight:3,dashArray:'6 4'}).addTo(map);
@@ -938,22 +939,76 @@ function extendDraw(latlng){
   pts.push(latlng); tempLine.setLatLngs(pts);
 }
 function endDraw(){ if(drawing){ drawing=false; finishDraw(); } }
-// pointer-события: одинаково работают для мыши, трекпада, пальца и пера (iPad)
+function cancelDraw(){ drawing=false; if(tempLine){ map.removeLayer(tempLine); tempLine=null; } pts=[]; }
+
+// pointer-события: мышь/трекпад/палец/перо. Один палец — рисуем; два — зум/перенос карты (без рисования)
 const cont = map.getContainer();
+const activePointers = new Set();
+let gesturing = false;
 function toLatLng(ev){
   const r=cont.getBoundingClientRect();
   return map.containerPointToLatLng([ev.clientX-r.left, ev.clientY-r.top]);
 }
 cont.addEventListener('pointerdown',ev=>{
-  if(mode!=='draw') return;
+  if(mode!=='draw') return;                 // в режиме «Выбрать страну» — обычные жесты карты
+  activePointers.add(ev.pointerId);
+  if(activePointers.size>=2){                // второй палец → жест масштаб/перенос: рисование отменяем
+    gesturing=true; cancelDraw();
+    return;                                  // НЕ preventDefault — отдаём жест карте (pinch-zoom)
+  }
+  if(gesturing) return;
   ev.preventDefault();
   try{ cont.setPointerCapture(ev.pointerId); }catch(e){}
   startDraw(toLatLng(ev));
 });
-cont.addEventListener('pointermove',ev=>{ if(drawing){ ev.preventDefault(); extendDraw(toLatLng(ev)); }});
-cont.addEventListener('pointerup',endDraw);
-cont.addEventListener('pointercancel',endDraw);
-cont.addEventListener('pointerleave',endDraw);
+cont.addEventListener('pointermove',ev=>{
+  if(drawing && !gesturing && activePointers.size===1){ ev.preventDefault(); extendDraw(toLatLng(ev)); }
+});
+function pointerEnd(ev){
+  activePointers.delete(ev.pointerId);
+  if(activePointers.size===0){
+    if(gesturing){ gesturing=false; return; } // закончился жест двумя пальцами — ничего не применяем
+    endDraw();                                // одиночный штрих → применяем захват
+  }
+}
+cont.addEventListener('pointerup',pointerEnd);
+cont.addEventListener('pointercancel',pointerEnd);
+
+// ---- военная барабанная дробь (синтез, без файлов — работает офлайн) ----
+let audioCtx=null;
+function ensureAudio(){
+  try{
+    if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==='suspended') audioCtx.resume();
+  }catch(e){}
+}
+function playDrumroll(durSec){
+  if(!audioCtx) return;
+  const ctx=audioCtx, t0=ctx.currentTime, sr=ctx.sampleRate;
+  const master=ctx.createGain(); master.gain.value=0.5; master.connect(ctx.destination);
+  const nbuf=ctx.createBuffer(1, Math.floor(sr*0.05), sr);
+  const d=nbuf.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;   // белый шум = «щётка» малого барабана
+  const step=0.05, hits=Math.max(1,Math.floor(durSec/step));
+  for(let i=0;i<hits;i++){
+    const t=t0+i*step;
+    const src=ctx.createBufferSource(); src.buffer=nbuf;
+    const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1900; bp.Q.value=0.8;
+    const g=ctx.createGain();
+    const amp=0.18+0.27*(i/hits);                        // дробь нарастает
+    g.gain.setValueAtTime(0,t);
+    g.gain.linearRampToValueAtTime(amp,t+0.003);
+    g.gain.exponentialRampToValueAtTime(0.0008,t+0.045);
+    src.connect(bp); bp.connect(g); g.connect(master);
+    src.start(t); src.stop(t+0.05);
+  }
+  const t=t0+durSec;                                     // финальный акцент
+  const src=ctx.createBufferSource(); src.buffer=nbuf;
+  const bp=ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1100; bp.Q.value=0.5;
+  const g=ctx.createGain(); g.gain.setValueAtTime(0.8,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.45);
+  src.connect(bp); bp.connect(g); g.connect(master);
+  src.start(t); src.stop(t+0.5);
+}
 
 function feat(name){ return {type:'Feature',properties:{},geometry:state[name].geometry}; }
 function isPoly(g){ return g && (g.type==='Polygon'||g.type==='MultiPolygon'); }
@@ -1002,13 +1057,14 @@ function animateSweep(pocket, color, done){
   const pb=turf.bbox(pocket);
   const maxD=Math.max(turf.distance([pb[0],pb[1]],[pb[2],pb[3]],{units:'kilometers'}),25);
   const flood=L.geoJSON(null,{style:{color:color,weight:0,fillColor:color,fillOpacity:0.85,stroke:false}}).addTo(map);
-  const t0=performance.now(), dur=900; let lastStep=-1, fin=false;
+  const t0=performance.now(), dur=4500; let lastStep=-1, fin=false;   // в 5 раз медленнее — войска занимают территорию
+  playDrumroll(dur/1000);                        // военная барабанная дробь на время захвата
   function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} done(); }
   (function step(t){
     if(fin) return;
     const k=Math.min(1,(t-t0)/dur);
     const ek=1-Math.pow(1-k,2);                 // плавный разгон фронта
-    const s=Math.floor(k*26);
+    const s=Math.floor(k*60);
     if(s!==lastStep){ lastStep=s;
       try{
         const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'});
