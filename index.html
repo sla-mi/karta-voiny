@@ -1016,40 +1016,86 @@ function cleanFill(shape){
   return shape;
 }
 
-// обводим область -> берём сушу одной страны-жертвы. Форма не зависит от скорости рисования.
+// сглаживание ОТКРЫТОЙ линии (концы на месте)
+function chaikinOpen(p, iters){
+  if(p.length<3) return p;
+  for(let it=0; it<iters; it++){
+    const out=[p[0]];
+    for(let i=0;i<p.length-1;i++){ const a=p[i],b=p[i+1];
+      out.push([a[0]*0.75+b[0]*0.25,a[1]*0.75+b[1]*0.25]);
+      out.push([a[0]*0.25+b[0]*0.75,a[1]*0.25+b[1]*0.75]); }
+    out.push(p[p.length-1]); p=out;
+  }
+  return p;
+}
+// выбрать страну-жертву: где проходит линия
+function pickTarget(line){
+  const mid=line[Math.floor(line.length/2)];
+  for(const name of Object.keys(state)){
+    if(name===active) continue;
+    try{ if(turf.booleanPointInPolygon(mid, feat(name))) return name; }catch(e){}
+  }
+  let best=0, target=null, lf=turf.lineString(line);
+  for(const name of Object.keys(state)){
+    if(name===active) continue;
+    try{ const kb=turf.buffer(lf,3,{units:'kilometers'}); const it=kb&&turf.intersect(kb,feat(name)); if(it){const a=turf.area(it); if(a>best){best=a;target=name;}} }catch(e){}
+  }
+  return target;
+}
+// ОСНОВНОЙ способ: линия рассекает страну, агрессор забирает кусок ДО линии (связанный со своим телом)
+function captureUpToLine(line, target){
+  try{
+    const tgt=feat(target), tb=turf.bbox(tgt);
+    const diag=Math.hypot(tb[2]-tb[0],tb[3]-tb[1])+1;
+    const ext=(a,b,d)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1e-9;return [b[0]+dx/L*d,b[1]+dy/L*d];};
+    const A=ext(line[1],line[0],diag), B=ext(line[line.length-2],line[line.length-1],diag);
+    const knife=turf.buffer(turf.lineString([A,...line,B]),0.4,{units:'kilometers'});
+    if(!knife) return null;
+    const cut=turf.difference(tgt,knife);
+    if(!cut) return null;
+    const polys = cut.geometry.type==='Polygon' ? [cut.geometry.coordinates] : cut.geometry.coordinates;
+    if(polys.length<2) return null;                  // линия не рассекла страну -> запасной способ
+    let aggBuf=null;
+    try{ const c=turf.bboxClip(feat(active),[tb[0]-1,tb[1]-1,tb[2]+1,tb[3]+1]); const cg=isPoly(c.geometry)?c:feat(active); aggBuf=turf.buffer(cg,3,{units:'kilometers'}); }catch(e){}
+    const pieces=polys.map(c=>{ const f={type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:c}}; let a=0; try{a=turf.area(f);}catch(e){} let adj=true; try{adj=aggBuf?turf.booleanIntersects(f,aggBuf):true;}catch(e){} return {f,a,adj}; });
+    const adjacent=pieces.filter(p=>p.adj);
+    let chosen;
+    if(adjacent.length===0) return null;             // ни один кусок не примыкает к агрессору -> лассо
+    else if(adjacent.length===1) chosen=adjacent;
+    else { adjacent.sort((x,y)=>x.a-y.a); chosen=[adjacent[0]]; }  // несколько примыкают -> меньший (вырезанный выступ)
+    let captured=null;
+    for(const p of chosen){ try{ captured=captured?(turf.union(captured,p.f)||captured):p.f; }catch(e){ if(!captured)captured=p.f; } }
+    if(captured){                                    // закрыть тонкий зазор от «ножа»
+      const grown=turf.buffer(captured,0.7,{units:'kilometers'});
+      const cl=grown&&turf.intersect(grown,tgt);
+      if(cl&&isPoly(cl.geometry)) captured=cl;
+    }
+    return (captured&&isPoly(captured.geometry))?captured:null;
+  }catch(e){ return null; }
+}
+// запасной способ: замкнуть линию в петлю и взять её содержимое
+function captureLasso(line, target){
+  try{
+    let ring=line.slice(); ring.push(ring[0]);
+    let shape=turf.polygon([ring]);
+    shape=cleanFill(turf.polygon([chaikinClosed(shape.geometry.coordinates[0],1)]));
+    const it=turf.intersect(shape, feat(target));
+    return (it&&isPoly(it.geometry))?it:null;
+  }catch(e){ return null; }
+}
+
+// рисуем линию новой границы -> агрессор заливает до неё
 function finishDraw(){
   if(tempLine){ map.removeLayer(tempLine); tempLine=null; }
-  if(!active || pts.length<3){ pts=[]; return; }
-  let coords=pts.map(p=>[p.lng,p.lat]); coords.push(coords[0]);
-  let shape;
-  try{
-    shape=turf.polygon([coords]);
-    // нормализуем плотность точек -> быстрый и медленный штрих дают одинаковую фигуру
-    shape=turf.simplify(shape,{tolerance:0.012,highQuality:false});
-    // сглаживаем углы -> плавная непрерывная граница независимо от скорости
-    let ring=chaikinClosed(shape.geometry.coordinates[0], 2);
-    shape=turf.polygon([ring]);
-    shape=cleanFill(shape);                         // убрать самопересечения -> цельная фигура
-  }catch(e){ pts=[]; return; }
+  if(!active || pts.length<2){ pts=[]; return; }
+  let line=pts.map(p=>[p.lng,p.lat]);
   pts=[];
-
-  // ОДНА страна-жертва — у кого наибольшее пересечение с обведённой областью.
-  // Остальные страны по умолчанию не трогаем.
-  let target=null, best=0, raw=null;
-  Object.keys(state).forEach(name=>{
-    if(name===active) return;
-    let inter;
-    try{ inter=turf.intersect(shape, feat(name)); }catch(e){ return; }
-    if(inter && isPoly(inter.geometry)){
-      let a=0; try{ a=turf.area(inter); }catch(e){}
-      if(a>best){ best=a; target=name; raw=inter; }
-    }
-  });
-  if(!target || !raw){
-    hint('Веди линию по земле соседней страны (в море нельзя)');
-    return;
-  }
-  startCapture(target, raw);   // raw строго внутри страны-жертвы — соседей не трогаем
+  line=chaikinOpen(line,2);
+  const target=pickTarget(line);
+  if(!target){ hint('Веди линию по земле соседней страны (в море нельзя)'); return; }
+  let captured=captureUpToLine(line,target) || captureLasso(line,target);
+  if(!captured || !isPoly(captured.geometry)){ hint('Не получилось — проведи линию через страну'); return; }
+  startCapture(target, captured);
 }
 
 // разбить геометрию на крупные куски и мелкие осколки по площади (км²)
