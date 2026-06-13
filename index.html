@@ -1004,6 +1004,18 @@ function chaikinClosed(ring, iters){
   return p;
 }
 
+// «расшиваем» самопересечения контура в одну цельную залитую фигуру (без дырок и линз)
+function cleanFill(shape){
+  try{
+    const uk=turf.unkinkPolygon(shape);            // разбить самопересечения на простые полигоны
+    const fs=(uk&&uk.features)||[];
+    let out=null;
+    for(const f of fs){ try{ out = out ? (turf.union(out,f)||out) : f; }catch(e){} }
+    if(out && isPoly(out.geometry)) return out;
+  }catch(e){}
+  return shape;
+}
+
 // обводим область -> берём сушу одной страны-жертвы. Форма не зависит от скорости рисования.
 function finishDraw(){
   if(tempLine){ map.removeLayer(tempLine); tempLine=null; }
@@ -1017,6 +1029,7 @@ function finishDraw(){
     // сглаживаем углы -> плавная непрерывная граница независимо от скорости
     let ring=chaikinClosed(shape.geometry.coordinates[0], 2);
     shape=turf.polygon([ring]);
+    shape=cleanFill(shape);                         // убрать самопересечения -> цельная фигура
   }catch(e){ pts=[]; return; }
   pts=[];
 
