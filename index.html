@@ -991,41 +991,65 @@ function finishDraw(){
   }catch(e){ pts=[]; return; }
   pts=[];
 
-  const pieces=[]; let region=null;             // region = вся захватываемая суша
+  // ОДНА страна-жертва — у кого наибольшее пересечение с обведённой областью.
+  // Остальные страны по умолчанию не трогаем.
+  let target=null, best=0, raw=null;
   Object.keys(state).forEach(name=>{
     if(name===active) return;
     let inter;
     try{ inter=turf.intersect(shape, feat(name)); }catch(e){ return; }
     if(inter && isPoly(inter.geometry)){
-      pieces.push({name, inter});
-      try{ region = region ? (turf.union(region, inter)||region) : inter; }catch(e){ if(!region) region=inter; }
+      let a=0; try{ a=turf.area(inter); }catch(e){}
+      if(a>best){ best=a; target=name; raw=inter; }
     }
   });
-  if(!region || !isPoly(region.geometry)){
-    document.getElementById('hint').textContent='Веди линию по земле (в море захватывать нельзя).';
+  if(!target || !raw){
+    document.getElementById('hint').textContent='Веди линию по земле соседней страны (в море захватывать нельзя).';
     return;
   }
-  startCapture(pieces, region);
+  startCapture(target, deSpike(raw));   // deSpike убирает тонкие отростки
+}
+
+// убирает тонкие «отростки» (морфологическое открытие), сохраняя край у границы агрессора без зазора
+function deSpike(raw){
+  const OPEN=10;
+  let opened=null;
+  try{
+    let g=turf.buffer(raw,-OPEN,{units:'kilometers'});
+    if(g && isPoly(g.geometry)){ g=turf.buffer(g,OPEN+0.5,{units:'kilometers'}); if(g && isPoly(g.geometry)) opened=g; }
+  }catch(e){}
+  if(!opened) return raw;                    // узкий захват целиком — оставляем как нарисовано
+  try{
+    const bb=turf.bbox(raw), pad=0.6;
+    const localAgg=turf.bboxClip(feat(active),[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]);
+    const aggBuf=isPoly(localAgg.geometry)?turf.buffer(localAgg,OPEN+4,{units:'kilometers'}):null;
+    const nearAgg=aggBuf?turf.intersect(raw,aggBuf):null;   // полоса вдоль агрессора — вернуть полностью
+    if(nearAgg && isPoly(nearAgg.geometry)){
+      const u=turf.union(opened,nearAgg);
+      if(u && isPoly(u.geometry)) return u;
+    }
+  }catch(e){}
+  return opened;
 }
 
 // захват: сначала убираем землю у соперников (область становится «ничьей»),
 // затем по ней наступает ТОЧНЫЙ цвет агрессора кратчайшим путём, и в конце земля присоединяется к агрессору.
-function startCapture(pieces, region){
+function startCapture(target, region){
   // сначала убеждаемся, что агрессор сможет поглотить область
   let newAtk=null;
   try{ const m=turf.union(feat(active),region); if(m&&isPoly(m.geometry)) newAtk=clean(m.geometry); }catch(e){}
   if(!newAtk){ document.getElementById('hint').textContent='Не получилось присоединить зону — попробуй обвести иначе.'; return; }
-  const updates=[];
-  for(const p of pieces){
-    try{
-      const d=turf.difference(feat(p.name), region);
-      if(d===null) updates.push([p.name,null]);                 // страна поглощена полностью
-      else if(isPoly(d.geometry)) updates.push([p.name, clean(d.geometry)]);
-    }catch(e){}                                                 // не вышло у одной — просто пропускаем её
-  }
+  let newTgt='fail';
+  try{
+    const d=turf.difference(feat(target),region);
+    if(d===null) newTgt=null;                                   // страна поглощена полностью
+    else if(isPoly(d.geometry)) newTgt=clean(d.geometry);
+  }catch(e){}
+  if(newTgt==='fail'){ document.getElementById('hint').textContent='Не получилось отрезать зону у соседа — попробуй обвести иначе.'; return; }
+
   snapshot();
-  // ФАЗА 1: снимаем землю у соперников (агрессора пока не трогаем) — область освобождается
-  for(const u of updates){ if(u[1]===null) delete state[u[0]]; else state[u[0]].geometry=u[1]; }
+  // ФАЗА 1: снимаем землю у жертвы (агрессора пока не трогаем) — область освобождается
+  if(newTgt===null) delete state[target]; else state[target].geometry=newTgt;
   render();
   // ФАЗА 2: фронт точного цвета агрессора заполняет область, затем земля становится частью агрессора
   animateFill(region, state[active].color, ()=>{
@@ -1043,6 +1067,7 @@ function animateFill(region, color, done){
   }catch(e){ adjacent=false; }
   const pb=turf.bbox(region);
   const maxD=Math.max(turf.distance([pb[0],pb[1]],[pb[2],pb[3]],{units:'kilometers'}),25);
+  const regionArea=(()=>{ try{ return turf.area(region); }catch(e){ return 0; } })();
   const flood=L.geoJSON(null,{style:{weight:0,stroke:false,fillColor:color,fillOpacity:0.6}}).addTo(map);
   const t0=performance.now(), dur=4500; let lastStep=-1, fin=false;
   function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} done(); }
@@ -1057,6 +1082,10 @@ function animateFill(region, color, done){
         if(adjacent){
           const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'}); // фронт от границы агрессора
           band=g?turf.intersect(region,g):null;
+          // как только область покрыта — заканчиваем сразу, без паузы
+          if(band && regionArea>0 && turf.area(band)>=regionArea*0.99){
+            flood.clearLayers(); flood.addData(region); finish(); return;
+          }
         } else {
           band=region; flood.setStyle({fillOpacity:0.6*ek});              // не примыкает — просто проявляем тем же цветом
         }
