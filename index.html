@@ -823,6 +823,16 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
 // ---- стабильный цвет для каждой страны (золотое сечение по тону) ----
 function colorFor(i){ const h=(i*137.508)%360; return `hsl(${h.toFixed(0)},62%,55%)`; }
 
+// «заливаем» внутренние озёра/реки: убираем внутренние кольца, оставляем только внешний контур страны.
+// (моря — это НЕ дырки, а пространство снаружи контуров, поэтому они не заливаются.)
+function fillHoles(g){
+  try{
+    if(g.type==='Polygon') return {type:'Polygon',coordinates:[g.coordinates[0]]};
+    if(g.type==='MultiPolygon') return {type:'MultiPolygon',coordinates:g.coordinates.map(p=>[p[0]])};
+  }catch(e){}
+  return g;
+}
+
 let state = {};          // name -> {geometry, color}
 let active = null;       // имя наступающей страны
 let mode = 'select';     // 'select' | 'draw'
@@ -838,13 +848,15 @@ let labelGroup = L.layerGroup().addTo(map);
   if(saved){
     try{ state = JSON.parse(saved); }catch(e){ buildState(geo); }
   } else buildState(geo);
+  // на всякий случай заливаем дырки и в сохранённой карте (старые сохранения)
+  Object.keys(state).forEach(n=>{ if(state[n]&&state[n].geometry) state[n].geometry=fillHoles(state[n].geometry); });
   render();
 })();
 
 function buildState(geo){
   state={};
   geo.features.forEach((f,i)=>{
-    state[f.properties.NAME] = { geometry:f.geometry, color:colorFor(i) };
+    state[f.properties.NAME] = { geometry:fillHoles(f.geometry), color:colorFor(i) };
   });
 }
 
@@ -1069,8 +1081,9 @@ function animateFill(region, color, done){
   const maxD=Math.max(turf.distance([pb[0],pb[1]],[pb[2],pb[3]],{units:'kilometers'}),25);
   const regionArea=(()=>{ try{ return turf.area(region); }catch(e){ return 0; } })();
   const flood=L.geoJSON(null,{style:{weight:0,stroke:false,fillColor:color,fillOpacity:0.6}}).addTo(map);
-  const t0=performance.now(), dur=4500; let lastStep=-1, fin=false;
+  const t0=performance.now(), dur=4500; let lastStep=-1, fin=false, cover=0, stale=0;
   function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} done(); }
+  function finishFull(){ try{ flood.clearLayers(); flood.addData(region); }catch(e){} finish(); }
   (function step(t){
     if(fin) return;
     const k=Math.min(1,(t-t0)/dur);
@@ -1082,9 +1095,13 @@ function animateFill(region, color, done){
         if(adjacent){
           const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'}); // фронт от границы агрессора
           band=g?turf.intersect(region,g):null;
-          // как только область покрыта — заканчиваем сразу, без паузы
-          if(band && regionArea>0 && turf.area(band)>=regionArea*0.99){
-            flood.clearLayers(); flood.addData(region); finish(); return;
+          // завершаем, как только область закрашена ИЛИ заливка перестала расти (плато) — без паузы
+          if(band && regionArea>0){
+            const c=turf.area(band)/regionArea;
+            if(c>=0.985){ finishFull(); return; }
+            if(c<=cover+0.004){ stale++; } else { stale=0; }
+            cover=Math.max(cover,c);
+            if(stale>=3 && cover>0.7){ finishFull(); return; }
           }
         } else {
           band=region; flood.setStyle({fillOpacity:0.6*ek});              // не примыкает — просто проявляем тем же цветом
@@ -1092,9 +1109,10 @@ function animateFill(region, color, done){
         flood.clearLayers(); if(band) flood.addData(band);
       }catch(e){}
     }
-    if(k<1) requestAnimationFrame(step);
+    if(k>=1){ finishFull(); return; }   // дошли до конца времени — фиксируем сразу
+    requestAnimationFrame(step);
   })(t0);
-  setTimeout(finish, dur+60);   // присоединение гарантированно, даже если анимация прервётся
+  setTimeout(finish, dur+120);   // страховка: присоединение гарантированно, даже если анимация прервётся
 }
 
 function save(){ try{ localStorage.setItem('warmap',JSON.stringify(state)); }catch(e){} }
