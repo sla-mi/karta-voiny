@@ -1041,27 +1041,22 @@ function chaikinOpen(p, iters){
   }
   return p;
 }
-// выбрать страну-жертву: СТРОГО та, у которой НАИБОЛЬШАЯ площадь внутри выделения
-function pickTarget(line){
-  // зона-зонд: содержимое замкнутой петли (для линии — линия+хорда)
+// выбрать страну-жертву: ТОЛЬКО по площади внутри выделения. Никакого «центра линии».
+// петля -> площадь содержимого петли; линия -> площадь коридора вдоль линии (где линия проходит больше).
+function pickTarget(line, closed){
   let probe=null;
-  try{ const ring=line.slice(); ring.push(ring[0]); probe=cleanFill(turf.polygon([ring])); }catch(e){}
-  if(!probe){ try{ probe=turf.buffer(turf.lineString(line),5,{units:'kilometers'}); }catch(e){} }
-  if(probe){
-    let best=0, target=null;
-    for(const name of Object.keys(state)){
-      if(name===active) continue;
-      try{ const it=turf.intersect(probe, feat(name)); if(it){ const a=turf.area(it); if(a>best){best=a; target=name;} } }catch(e){}
-    }
-    if(target) return target;
-  }
-  // запас: страна под средней точкой линии
-  const mid=line[Math.floor(line.length/2)];
+  try{
+    if(closed){ const ring=line.slice(); ring.push(ring[0]); probe=cleanFill(turf.polygon([ring])); }
+    else { probe=turf.buffer(turf.lineString(line),15,{units:'kilometers'}); }
+  }catch(e){}
+  if(!probe){ try{ probe=turf.buffer(turf.lineString(line),15,{units:'kilometers'}); }catch(e){} }
+  if(!probe) return null;
+  let best=0, target=null;
   for(const name of Object.keys(state)){
     if(name===active) continue;
-    try{ if(turf.booleanPointInPolygon(mid, feat(name))) return name; }catch(e){}
+    try{ const it=turf.intersect(probe, feat(name)); if(it){ const a=turf.area(it); if(a>best){best=a; target=name;} } }catch(e){}
   }
-  return null;
+  return target;
 }
 // замкнутая петля? (концы рядом относительно длины штриха) -> берём содержимое; иначе линия -> заливка до неё
 function isClosedLoop(line){
@@ -1122,10 +1117,10 @@ function finishDraw(){
   let line=pts.map(p=>[p.lng,p.lat]);
   pts=[];
   line=chaikinOpen(line,2);
-  const target=pickTarget(line);
-  if(!target){ hint('Веди линию по земле соседней страны (в море нельзя)'); return; }
   // замкнул петлю -> берём содержимое (острова, любой кусок); провёл линию -> заливка до линии
   const closed=isClosedLoop(line);
+  const target=pickTarget(line, closed);
+  if(!target){ hint('Веди линию по земле соседней страны (в море нельзя)'); return; }
   let captured = closed ? (captureLasso(line,target) || captureUpToLine(line,target))
                         : (captureUpToLine(line,target) || captureLasso(line,target));
   if(!captured || !isPoly(captured.geometry)){ hint('Не получилось — проведи линию через страну'); return; }
