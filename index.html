@@ -1038,24 +1038,27 @@ function chaikinOpen(p, iters){
   }
   return p;
 }
-// выбрать страну-жертву: где проходит линия (или что внутри петли — для островов)
+// выбрать страну-жертву: СТРОГО та, у которой НАИБОЛЬШАЯ площадь внутри выделения
 function pickTarget(line){
+  // зона-зонд: содержимое замкнутой петли (для линии — линия+хорда)
+  let probe=null;
+  try{ const ring=line.slice(); ring.push(ring[0]); probe=cleanFill(turf.polygon([ring])); }catch(e){}
+  if(!probe){ try{ probe=turf.buffer(turf.lineString(line),5,{units:'kilometers'}); }catch(e){} }
+  if(probe){
+    let best=0, target=null;
+    for(const name of Object.keys(state)){
+      if(name===active) continue;
+      try{ const it=turf.intersect(probe, feat(name)); if(it){ const a=turf.area(it); if(a>best){best=a; target=name;} } }catch(e){}
+    }
+    if(target) return target;
+  }
+  // запас: страна под средней точкой линии
   const mid=line[Math.floor(line.length/2)];
   for(const name of Object.keys(state)){
     if(name===active) continue;
     try{ if(turf.booleanPointInPolygon(mid, feat(name))) return name; }catch(e){}
   }
-  // по содержимому замкнутой петли (помогает для островов и рисования вокруг земли по морю)
-  let probe=null;
-  try{ const ring=line.slice(); ring.push(ring[0]); probe=cleanFill(turf.polygon([ring])); }catch(e){}
-  if(!probe){ try{ probe=turf.buffer(turf.lineString(line),5,{units:'kilometers'}); }catch(e){} }
-  if(!probe) return null;
-  let best=0, target=null;
-  for(const name of Object.keys(state)){
-    if(name===active) continue;
-    try{ const it=turf.intersect(probe, feat(name)); if(it){ const a=turf.area(it); if(a>best){best=a; target=name;} } }catch(e){}
-  }
-  return target;
+  return null;
 }
 // замкнутая петля? (концы рядом относительно длины штриха) -> берём содержимое; иначе линия -> заливка до неё
 function isClosedLoop(line){
