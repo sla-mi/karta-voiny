@@ -827,7 +827,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 16:30';
+const BUILD='14.06.2026 17:03';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1124,6 +1124,32 @@ function cleanFill(shape){
   }catch(e){}
   return shape;
 }
+// из захваченного оставляем части, СВЯЗАННЫЕ с агрессором (с допуском на зазоры в данных).
+// если ни одна не связана (остров/удалённый кусок) — берём крупнейшую. Так нет оторванных «окружений».
+function pickConnected(f, agg){
+  try{
+    const g=f.geometry;
+    if(g.type!=='MultiPolygon') return f;          // один кусок — ничего делить
+    const bb=turf.bbox(f), pad=0.6;
+    let aggBuf=null;
+    try{ const c=turf.bboxClip(agg,[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]); if(isPoly(c.geometry)) aggBuf=turf.buffer(c,3,{units:'kilometers'}); }catch(e){}
+    const all=[], touching=[];
+    for(const coords of g.coordinates){
+      const piece={type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:coords}};
+      let a=0; try{ a=turf.area(piece); }catch(e){}
+      all.push({piece,a});
+      let t=false; try{ t=aggBuf?turf.booleanIntersects(piece,aggBuf):false; }catch(e){}
+      if(t) touching.push(piece);
+    }
+    if(touching.length){
+      let out=touching[0];
+      for(let i=1;i<touching.length;i++){ try{ out=turf.union(out,touching[i])||out; }catch(e){} }
+      return out;
+    }
+    all.sort((x,y)=>y.a-x.a);
+    return all.length?all[0].piece:f;
+  }catch(e){ return f; }
+}
 
 // сглаживание ОТКРЫТОЙ линии (концы на месте)
 function chaikinOpen(p, iters){
@@ -1161,7 +1187,8 @@ function captureLasso(line, target){
   try{
     let ring=line.slice(); ring.push(ring[0]);
     let shape=cleanFill(turf.polygon([ring]));   // без повторного сглаживания (линия уже сглажена)
-    const it=turf.intersect(shape, feat(target));
+    let it=turf.intersect(shape, feat(target));
+    if(it&&isPoly(it.geometry)) it=pickConnected(it, feat(active));   // связное с агрессором — без оторванных «окружений»
     return (it&&isPoly(it.geometry))?it:null;
   }catch(e){ return null; }
 }
