@@ -817,7 +817,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 15:54';
+const BUILD='14.06.2026 16:06';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1065,12 +1065,13 @@ function pickTarget(line, closed){
   }
   return target;
 }
-// захват: замкнуть обведённое в петлю и взять её содержимое внутри страны-жертвы
+// захват: замкнуть обведённое в петлю и взять её содержимое внутри страны-жертвы.
+// cleanFill (unkinkPolygon+union) превращает любую самопересекающуюся фигуру в ЦЕЛЬНУЮ
+// залитую область (все охваченные части), без дырок и «потерянных» долей.
 function captureLasso(line, target){
   try{
     let ring=line.slice(); ring.push(ring[0]);
-    let shape=turf.polygon([ring]);
-    shape=cleanFill(turf.polygon([chaikinClosed(shape.geometry.coordinates[0],1)]));
+    let shape=cleanFill(turf.polygon([ring]));   // без повторного сглаживания (линия уже сглажена)
     const it=turf.intersect(shape, feat(target));
     return (it&&isPoly(it.geometry))?it:null;
   }catch(e){ return null; }
