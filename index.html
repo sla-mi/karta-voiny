@@ -827,7 +827,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 17:20';
+const BUILD='14.06.2026 17:24';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -988,9 +988,21 @@ function renderRecList(){
     const row=document.createElement('div'); row.style.cssText='display:flex;gap:4px;';
     const b=document.createElement('button'); b.className='recitem'; b.style.flex='1'; b.textContent='▶ '+r.name;
     b.onclick=()=>{ el.style.display='none'; playRecording(r); };
+    const ex=document.createElement('button'); ex.className='recitem'; ex.style.cssText='flex:none;width:38px;text-align:center;'; ex.textContent='⤓'; ex.title='Скачать запись файлом';
+    ex.onclick=()=>{
+      try{
+        const blob=new Blob([JSON.stringify(r)],{type:'application/json'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a'); a.href=url;
+        a.download=('zapis '+r.name).replace(/[^\wа-яёА-ЯЁ.-]+/g,'_')+'.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),3000);
+        hint('Файл записи сохранён');
+      }catch(e){ hint('Не удалось скачать'); }
+    };
     const d=document.createElement('button'); d.className='recitem'; d.style.cssText='flex:none;width:38px;text-align:center;color:#c0392b;'; d.textContent='✕'; d.title='Удалить запись';
     d.onclick=()=>{ recordings.splice(idx,1); try{ localStorage.setItem('warmap_recs', JSON.stringify(recordings)); }catch(e){} renderRecList(); };
-    row.appendChild(b); row.appendChild(d); el.appendChild(row);
+    row.appendChild(b); row.appendChild(ex); row.appendChild(d); el.appendChild(row);
   });
 }
 function toggleRecList(){
