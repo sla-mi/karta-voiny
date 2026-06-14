@@ -1028,19 +1028,35 @@ function chaikinOpen(p, iters){
   }
   return p;
 }
-// выбрать страну-жертву: где проходит линия
+// выбрать страну-жертву: где проходит линия (или что внутри петли — для островов)
 function pickTarget(line){
   const mid=line[Math.floor(line.length/2)];
   for(const name of Object.keys(state)){
     if(name===active) continue;
     try{ if(turf.booleanPointInPolygon(mid, feat(name))) return name; }catch(e){}
   }
-  let best=0, target=null, lf=turf.lineString(line);
+  // по содержимому замкнутой петли (помогает для островов и рисования вокруг земли по морю)
+  let probe=null;
+  try{ const ring=line.slice(); ring.push(ring[0]); probe=cleanFill(turf.polygon([ring])); }catch(e){}
+  if(!probe){ try{ probe=turf.buffer(turf.lineString(line),5,{units:'kilometers'}); }catch(e){} }
+  if(!probe) return null;
+  let best=0, target=null;
   for(const name of Object.keys(state)){
     if(name===active) continue;
-    try{ const kb=turf.buffer(lf,3,{units:'kilometers'}); const it=kb&&turf.intersect(kb,feat(name)); if(it){const a=turf.area(it); if(a>best){best=a;target=name;}} }catch(e){}
+    try{ const it=turf.intersect(probe, feat(name)); if(it){ const a=turf.area(it); if(a>best){best=a; target=name;} } }catch(e){}
   }
   return target;
+}
+// линия близко к агрессору? (тогда «заливаем до линии», иначе берём содержимое петли — острова и т.п.)
+function lineNearAggressor(line){
+  try{
+    const lb=turf.bbox(turf.lineString(line)), pad=1.2;
+    const clip=turf.bboxClip(feat(active),[lb[0]-pad,lb[1]-pad,lb[2]+pad,lb[3]+pad]);
+    if(!isPoly(clip.geometry)) return false;
+    const ab=turf.buffer(clip,60,{units:'kilometers'});
+    if(!ab) return false;
+    return turf.booleanPointInPolygon(turf.point(line[0]),ab) || turf.booleanPointInPolygon(turf.point(line[line.length-1]),ab);
+  }catch(e){ return false; }
 }
 // ОСНОВНОЙ способ: линия рассекает страну, агрессор забирает кусок ДО линии (связанный со своим телом)
 function captureUpToLine(line, target){
@@ -1093,7 +1109,10 @@ function finishDraw(){
   line=chaikinOpen(line,2);
   const target=pickTarget(line);
   if(!target){ hint('Веди линию по земле соседней страны (в море нельзя)'); return; }
-  let captured=captureUpToLine(line,target) || captureLasso(line,target);
+  // у границы агрессора — заливаем до линии; далеко (остров и т.п.) — берём содержимое петли
+  const nearAgg=lineNearAggressor(line);
+  let captured = nearAgg ? (captureUpToLine(line,target) || captureLasso(line,target))
+                         : (captureLasso(line,target) || captureUpToLine(line,target));
   if(!captured || !isPoly(captured.geometry)){ hint('Не получилось — проведи линию через страну'); return; }
   startCapture(target, captured);
 }
