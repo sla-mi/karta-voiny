@@ -830,7 +830,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 21:12';
+const BUILD='14.06.2026 21:22';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1172,8 +1172,8 @@ function pickConnected(f, agg){
       let t=false; try{ t=aggBuf?turf.booleanIntersects(piece,aggBuf):false; }catch(e){}
       if(t && a>bestTouchA){ bestTouchA=a; bestTouch=piece; }
     }
-    // примыкает к агрессору -> связная часть (фронт, без «ушей»); иначе -> крупнейшая (остров/оторванный кусок)
-    return bestTouch || bestAny;
+    // (для самопересекающегося штриха) берём только СВЯЗНУЮ с агрессором часть; нет такой -> null (мигнём, не заполняем)
+    return bestTouch;
   }catch(e){ return null; }
 }
 
@@ -1212,7 +1212,9 @@ function pickTarget(line, closed){
 function captureLasso(line, target){
   try{
     let ring=line.slice(); ring.push(ring[0]);
-    let shape=cleanFill(turf.polygon([ring]));   // без повторного сглаживания (линия уже сглажена)
+    const rawPoly=turf.polygon([ring]);
+    let selfX=false; try{ selfX=turf.kinks(rawPoly).features.length>0; }catch(e){}  // штрих сам себя пересёк?
+    let shape=cleanFill(rawPoly);
     // образовалась ли НОРМАЛЬНАЯ замкнутая область (а не тонкая «линия»)? компактность площадь/периметр²
     try{
       const sa=turf.area(shape)/1e6;
@@ -1220,9 +1222,22 @@ function captureLasso(line, target){
       if(!sa || !per || sa/(per*per) < 0.012) return null;   // слишком тонко -> замкнутой области нет
     }catch(e){}
     let it=turf.intersect(shape, feat(target));
-    if(it&&isPoly(it.geometry)) it=pickConnected(it, feat(active));   // связное с агрессором — без оторванных «окружений»
+    if(!it || !isPoly(it.geometry)) return null;
+    // чистая петля -> берём ВСЕ значимые части (можно сразу несколько островов);
+    // самопересечение -> одну часть (отсекаем «уши»/окружения).
+    it = selfX ? pickConnected(it, feat(active)) : keepSubstantial(it);
     return (it&&isPoly(it.geometry))?it:null;
   }catch(e){ return null; }
+}
+// оставить все части площадью >= 3 км² (убрать только числовые осколки), для захвата нескольких островов
+function keepSubstantial(f){
+  try{
+    const g=f.geometry;
+    if(g.type!=='MultiPolygon') return f;
+    const keep=g.coordinates.filter(c=>{ let a=0; try{ a=turf.area({type:'Feature',geometry:{type:'Polygon',coordinates:c}})/1e6; }catch(e){} return a>=3; });
+    if(!keep.length) return f;
+    return {type:'Feature',properties:{},geometry: keep.length===1?{type:'Polygon',coordinates:keep[0]}:{type:'MultiPolygon',coordinates:keep}};
+  }catch(e){ return f; }
 }
 
 // рисуем линию новой границы -> агрессор заливает до неё
