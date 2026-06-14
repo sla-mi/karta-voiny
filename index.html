@@ -827,7 +827,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 17:03';
+const BUILD='14.06.2026 17:10';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -981,18 +981,23 @@ function toggleRecord(){
     } else hint('Ходов не было — нечего сохранять');
   }
 }
+function renderRecList(){
+  const el=document.getElementById('reclist'); el.innerHTML='';
+  if(!recordings.length){ const e=document.createElement('div'); e.style.cssText='padding:6px 8px;font-size:12px;color:#666;'; e.textContent='Записей нет'; el.appendChild(e); return; }
+  recordings.forEach((r,idx)=>{
+    const row=document.createElement('div'); row.style.cssText='display:flex;gap:4px;';
+    const b=document.createElement('button'); b.className='recitem'; b.style.flex='1'; b.textContent='▶ '+r.name;
+    b.onclick=()=>{ el.style.display='none'; playRecording(r); };
+    const d=document.createElement('button'); d.className='recitem'; d.style.cssText='flex:none;width:38px;text-align:center;color:#c0392b;'; d.textContent='✕'; d.title='Удалить запись';
+    d.onclick=()=>{ recordings.splice(idx,1); try{ localStorage.setItem('warmap_recs', JSON.stringify(recordings)); }catch(e){} renderRecList(); };
+    row.appendChild(b); row.appendChild(d); el.appendChild(row);
+  });
+}
 function toggleRecList(){
   if(playing) return;
   const el=document.getElementById('reclist');
   if(el.style.display==='block'){ el.style.display='none'; return; }
-  if(!recordings.length){ hint('Нет сохранённых записей'); return; }
-  el.innerHTML='';
-  recordings.forEach(r=>{
-    const b=document.createElement('button'); b.className='recitem'; b.textContent='▶ '+r.name;
-    b.onclick=()=>{ el.style.display='none'; playRecording(r); };
-    el.appendChild(b);
-  });
-  el.style.display='block';
+  renderRecList(); el.style.display='block';
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 async function playRecording(rec){
@@ -1005,10 +1010,10 @@ async function playRecording(rec){
     state=JSON.parse(rec.start); render(); await sleep(450);
     for(let i=0;i<rec.moves.length;i++){
       const m=rec.moves[i], region={type:'Feature',properties:{},geometry:m.geom};
-      try{ const bb=turf.bbox(region); map.flyToBounds([[bb[1],bb[0]],[bb[3],bb[2]]],{duration:1.1, maxZoom:6, padding:[80,80]}); }catch(e){}
-      await sleep(1200);                       // даём камере плавно доехать
-      applyMove(m);                            // коммит + анимация заливки
-      await sleep(1000);
+      try{ const bb=turf.bbox(region); map.flyToBounds([[bb[1],bb[0]],[bb[3],bb[2]]],{duration:1.4, maxZoom:6, padding:[80,80]}); }catch(e){}
+      await sleep(1600);                       // даём камере плавно доехать
+      applyMove(m);                            // коммит + медленное движение границы (2.5с)
+      await sleep(2800);                       // смакуем захват
       if(i<rec.moves.length-1){
         let gap=rec.moves[i+1].ts - m.ts;
         gap=Math.max(150, Math.min(gap, 700)); // большие паузы пропускаем
@@ -1251,11 +1256,11 @@ function startCapture(target, region){
   animateFill(absorbed, state[active].color, victimColor, atkBefore);
 }
 
-// КОСМЕТИЧЕСКАЯ анимация поверх уже готового результата: base — цвет жертвы, flood — наступающий цвет агрессора.
-// Рядом с агрессором — медленный фронт от старой границы; далеко (остров) — быстро. Состояние НЕ меняет.
+// Анимация ДВИЖЕНИЯ ГРАНИЦЫ: поверх уже готового (агрессорского) результата лежит цвет ЖЕРТВЫ и
+// постепенно ОТСТУПАЕТ от старой границы агрессора -> граница двигается, цвет захвата идёт за ней.
+// Без отдельной заливки. В записи — медленно (смакуем). Состояние НЕ меняет.
 function animateFill(region, color, baseColor, atkBefore){
-  const base=L.geoJSON(region,{style:{weight:0,stroke:false,fillColor:baseColor,fillOpacity:0.6}}).addTo(map);
-  const flood=L.geoJSON(null,{style:{weight:0,stroke:false,fillColor:color,fillOpacity:0.6}}).addTo(map);
+  const overlay=L.geoJSON(region,{style:{weight:0,stroke:false,fillColor:baseColor,fillOpacity:0.6}}).addTo(map);
   let localAtk=atkBefore, adjacent=true;
   try{
     const bb=turf.bbox(region), pad=0.6;
@@ -1264,39 +1269,29 @@ function animateFill(region, color, baseColor, atkBefore){
   }catch(e){ adjacent=false; }
   const pb=turf.bbox(region);
   const maxD=Math.max(turf.distance([pb[0],pb[1]],[pb[2],pb[3]],{units:'kilometers'}),25);
-  const regionArea=(()=>{ try{ return turf.area(region); }catch(e){ return 0; } })();
-  const t0=performance.now(), dur=playing?900:(adjacent?4500:650); let lastStep=-1, fin=false, cover=0, stale=0;
-  function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} try{map.removeLayer(base);}catch(e){} }
-  function finishFull(){ try{ flood.clearLayers(); flood.addData(region); }catch(e){} finish(); }
+  const t0=performance.now(), dur=playing?2500:(adjacent?4500:650); let lastStep=-1, fin=false;
+  function finish(){ if(fin) return; fin=true; try{map.removeLayer(overlay);}catch(e){} }
   (function step(t){
     if(fin) return;
-    const k=Math.min(1,(t-t0)/dur);
-    const ek=1-Math.pow(1-k,2);
+    const k=Math.min(1,(t-t0)/dur), ek=1-Math.pow(1-k,2);
+    if(!adjacent){                                   // остров/удалённое — старый цвет просто угасает
+      overlay.setStyle({fillOpacity:0.6*(1-ek)});
+      if(k>=1){ finish(); return; } requestAnimationFrame(step); return;
+    }
     const s=Math.floor(k*60);
     if(s!==lastStep){ lastStep=s;
       try{
-        let band;
-        if(adjacent){
-          const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'}); // фронт от границы агрессора
-          band=g?turf.intersect(region,g):null;
-          // завершаем, как только область закрашена ИЛИ заливка перестала расти (плато) — без паузы
-          if(band && regionArea>0){
-            const c=turf.area(band)/regionArea;
-            if(c>=0.985){ finishFull(); return; }
-            if(c<=cover+0.004){ stale++; } else { stale=0; }
-            cover=Math.max(cover,c);
-            if(stale>=3 && cover>0.7){ finishFull(); return; }
-          }
-        } else {
-          band=region; flood.setStyle({fillOpacity:0.6*ek});              // не примыкает — просто проявляем тем же цветом
-        }
-        flood.clearLayers(); if(band) flood.addData(band);
+        const g=turf.buffer(localAtk, maxD*ek+2, {units:'kilometers'});
+        const remaining = g ? turf.difference(region, g) : region;   // ещё не захваченная часть (цвет жертвы)
+        overlay.clearLayers();
+        if(remaining && isPoly(remaining.geometry)) overlay.addData(remaining);
+        else { finish(); return; }                   // всё захвачено -> убираем остаток
       }catch(e){}
     }
-    if(k>=1){ finishFull(); return; }   // дошли до конца времени — фиксируем сразу
+    if(k>=1){ finish(); return; }
     requestAnimationFrame(step);
   })(t0);
-  setTimeout(finish, dur+120);   // страховка: присоединение гарантированно, даже если анимация прервётся
+  setTimeout(finish, dur+150);
 }
 
 function save(){ try{ localStorage.setItem('warmap',JSON.stringify(state)); }catch(e){} }
