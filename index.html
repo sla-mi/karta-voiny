@@ -817,7 +817,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 15:44';
+const BUILD='14.06.2026 15:54';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1065,48 +1065,7 @@ function pickTarget(line, closed){
   }
   return target;
 }
-// замкнутая петля? (концы рядом относительно длины штриха) -> берём содержимое; иначе линия -> заливка до неё
-function isClosedLoop(line){
-  let total=0;
-  for(let i=0;i<line.length-1;i++) total+=Math.hypot(line[i+1][0]-line[i][0], line[i+1][1]-line[i][1]);
-  const gap=Math.hypot(line[line.length-1][0]-line[0][0], line[line.length-1][1]-line[0][1]);
-  return total>0 && gap < total*0.3;
-}
-// ОСНОВНОЙ способ: линия рассекает страну, агрессор забирает кусок ДО линии (связанный со своим телом)
-function captureUpToLine(line, target){
-  try{
-    const tgt=feat(target), tb=turf.bbox(tgt);
-    const diag=Math.hypot(tb[2]-tb[0],tb[3]-tb[1])+1;
-    const ext=(a,b,d)=>{const dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy)||1e-9;return [b[0]+dx/L*d,b[1]+dy/L*d];};
-    const A=ext(line[1],line[0],diag), B=ext(line[line.length-2],line[line.length-1],diag);
-    const knife=turf.buffer(turf.lineString([A,...line,B]),0.4,{units:'kilometers'});
-    if(!knife) return null;
-    const cut=turf.difference(tgt,knife);
-    if(!cut) return null;
-    const polys = cut.geometry.type==='Polygon' ? [cut.geometry.coordinates] : cut.geometry.coordinates;
-    if(polys.length<2) return null;                  // линия не рассекла страну -> запасной способ
-    let aggBuf=null;
-    try{ const c=turf.bboxClip(feat(active),[tb[0]-1,tb[1]-1,tb[2]+1,tb[3]+1]); const cg=isPoly(c.geometry)?c:feat(active); aggBuf=turf.buffer(cg,3,{units:'kilometers'}); }catch(e){}
-    const pieces=polys.map(c=>{ const f={type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:c}}; let a=0; try{a=turf.area(f);}catch(e){} let adj=true; try{adj=aggBuf?turf.booleanIntersects(f,aggBuf):true;}catch(e){} return {f,a,adj}; });
-    const adjacent=pieces.filter(p=>p.adj);
-    let chosen;
-    if(adjacent.length===0) return null;             // ни один кусок не примыкает к агрессору -> лассо
-    else if(adjacent.length===1) chosen=adjacent;
-    else { adjacent.sort((x,y)=>x.a-y.a); chosen=[adjacent[0]]; }  // несколько примыкают -> меньший (вырезанный выступ)
-    let captured=null;
-    for(const p of chosen){ try{ captured=captured?(turf.union(captured,p.f)||captured):p.f; }catch(e){ if(!captured)captured=p.f; } }
-    if(captured){                                    // закрыть тонкий зазор от «ножа»
-      const grown=turf.buffer(captured,0.7,{units:'kilometers'});
-      const cl=grown&&turf.intersect(grown,tgt);
-      if(cl&&isPoly(cl.geometry)) captured=cl;
-    }
-    if(!captured || !isPoly(captured.geometry)) return null;
-    // защита: если «захватили» почти всю страну — это сбой выбора стороны, отдаём на запасной способ
-    try{ if(turf.area(captured) > turf.area(tgt)*0.92) return null; }catch(e){}
-    return cleanFill(captured);
-  }catch(e){ return null; }
-}
-// запасной способ: замкнуть линию в петлю и взять её содержимое
+// захват: замкнуть обведённое в петлю и взять её содержимое внутри страны-жертвы
 function captureLasso(line, target){
   try{
     let ring=line.slice(); ring.push(ring[0]);
@@ -1124,14 +1083,13 @@ function finishDraw(){
   let line=pts.map(p=>[p.lng,p.lat]);
   pts=[];
   line=chaikinOpen(line,2);
-  // замкнул петлю -> берём содержимое (острова, любой кусок); провёл линию -> заливка до линии
-  const closed=isClosedLoop(line);
-  const target=pickTarget(line, closed);
-  if(!target){ hint('Веди линию по земле соседней страны (в море нельзя)'); return; }
-  let captured = closed ? (captureLasso(line,target) || captureUpToLine(line,target))
-                        : (captureUpToLine(line,target) || captureLasso(line,target));
-  if(!captured || !isPoly(captured.geometry)){ hint('Не получилось — проведи линию через страну'); return; }
-  startCapture(target, captured, closed);   // петля -> быстрая заливка, линия -> фронт от агрессора
+  // ЕДИНСТВЕННАЯ логика: захват части ОДНОЙ страны (с наибольшей площадью в выделении),
+  // обрезанной по её реальным границам — агрессором, морями и другими странами.
+  const target=pickTarget(line, true);
+  if(!target){ hint('Веди по земле страны (в море захватывать нельзя)'); return; }
+  const captured=captureLasso(line, target);
+  if(!captured || !isPoly(captured.geometry)){ hint('Не получилось — обведи зону по земле'); return; }
+  startCapture(target, captured);
 }
 
 // разбить геометрию на крупные куски и мелкие осколки по площади (км²)
@@ -1148,7 +1106,7 @@ function splitBySize(geom, minKm2){
 
 // захват одной страны: жертва теряет область; мелкие осколки жертвы тоже отходят агрессору (без островков),
 // затем точный цвет агрессора наступает кратчайшим путём.
-function startCapture(target, region, quick){
+function startCapture(target, region){
   let dRaw='fail';
   try{ dRaw=turf.difference(feat(target),region); }catch(e){}
   if(dRaw==='fail'){ hint('Не получилось отрезать зону — обведи иначе'); return; }
@@ -1171,14 +1129,13 @@ function startCapture(target, region, quick){
   // ФАЗА 2: точный цвет агрессора заполняет область, затем земля присоединяется к агрессору
   animateFill(absorbed, state[active].color, ()=>{
     state[active].geometry=newAtk; render(); save();
-  }, quick);
+  });
 }
 
-// заливка ТОЧНЫМ цветом агрессора (та же прозрачность, что у закрашенных стран — 0.6), фронт от границы кратчайшим путём
-function animateFill(region, color, done, quick){
+// заливка ТОЧНЫМ цветом агрессора. Рядом с агрессором — медленный фронт от границы; далеко (остров) — быстро.
+function animateFill(region, color, done){
   let localAtk=feat(active), adjacent=true;
-  if(quick){ adjacent=false; }                    // петля (остров/кусок) — заливаем сразу, не ждём «подхода войск»
-  else try{
+  try{
     const bb=turf.bbox(region), pad=0.6;
     const c=turf.bboxClip(feat(active),[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]);
     if(isPoly(c.geometry)) localAtk=c; else adjacent=false;
@@ -1187,7 +1144,7 @@ function animateFill(region, color, done, quick){
   const maxD=Math.max(turf.distance([pb[0],pb[1]],[pb[2],pb[3]],{units:'kilometers'}),25);
   const regionArea=(()=>{ try{ return turf.area(region); }catch(e){ return 0; } })();
   const flood=L.geoJSON(null,{style:{weight:0,stroke:false,fillColor:color,fillOpacity:0.6}}).addTo(map);
-  const t0=performance.now(), dur=quick?650:4500; let lastStep=-1, fin=false, cover=0, stale=0;
+  const t0=performance.now(), dur=adjacent?4500:650; let lastStep=-1, fin=false, cover=0, stale=0;
   function finish(){ if(fin) return; fin=true; try{map.removeLayer(flood);}catch(e){} done(); }
   function finishFull(){ try{ flood.clearLayers(); flood.addData(region); }catch(e){} finish(); }
   (function step(t){
