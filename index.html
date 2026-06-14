@@ -1047,16 +1047,12 @@ function pickTarget(line){
   }
   return target;
 }
-// линия близко к агрессору? (тогда «заливаем до линии», иначе берём содержимое петли — острова и т.п.)
-function lineNearAggressor(line){
-  try{
-    const lb=turf.bbox(turf.lineString(line)), pad=1.2;
-    const clip=turf.bboxClip(feat(active),[lb[0]-pad,lb[1]-pad,lb[2]+pad,lb[3]+pad]);
-    if(!isPoly(clip.geometry)) return false;
-    const ab=turf.buffer(clip,60,{units:'kilometers'});
-    if(!ab) return false;
-    return turf.booleanPointInPolygon(turf.point(line[0]),ab) || turf.booleanPointInPolygon(turf.point(line[line.length-1]),ab);
-  }catch(e){ return false; }
+// замкнутая петля? (концы рядом относительно длины штриха) -> берём содержимое; иначе линия -> заливка до неё
+function isClosedLoop(line){
+  let total=0;
+  for(let i=0;i<line.length-1;i++) total+=Math.hypot(line[i+1][0]-line[i][0], line[i+1][1]-line[i][1]);
+  const gap=Math.hypot(line[line.length-1][0]-line[0][0], line[line.length-1][1]-line[0][1]);
+  return total>0 && gap < total*0.3;
 }
 // ОСНОВНОЙ способ: линия рассекает страну, агрессор забирает кусок ДО линии (связанный со своим телом)
 function captureUpToLine(line, target){
@@ -1109,10 +1105,10 @@ function finishDraw(){
   line=chaikinOpen(line,2);
   const target=pickTarget(line);
   if(!target){ hint('Веди линию по земле соседней страны (в море нельзя)'); return; }
-  // у границы агрессора — заливаем до линии; далеко (остров и т.п.) — берём содержимое петли
-  const nearAgg=lineNearAggressor(line);
-  let captured = nearAgg ? (captureUpToLine(line,target) || captureLasso(line,target))
-                         : (captureLasso(line,target) || captureUpToLine(line,target));
+  // замкнул петлю -> берём содержимое (острова, любой кусок); провёл линию -> заливка до линии
+  const closed=isClosedLoop(line);
+  let captured = closed ? (captureLasso(line,target) || captureUpToLine(line,target))
+                        : (captureUpToLine(line,target) || captureLasso(line,target));
   if(!captured || !isPoly(captured.geometry)){ hint('Не получилось — проведи линию через страну'); return; }
   startCapture(target, captured);
 }
