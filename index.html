@@ -690,6 +690,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
     background:rgba(20,20,20,.82);color:#fff;font-size:13px;padding:8px 14px;border-radius:10px;
     opacity:0;transition:opacity .25s;pointer-events:none;max-width:80%;text-align:center;}
   #toast.show{opacity:1;}
+  #ver{position:absolute;left:8px;bottom:6px;z-index:1100;font-size:10px;color:rgba(0,0,0,.5);
+    background:rgba(255,255,255,.55);padding:1px 6px;border-radius:6px;pointer-events:none;}
   .country-label{font-size:11px;font-weight:600;color:#222;text-shadow:0 0 3px #fff,0 0 3px #fff;
     background:none;border:none;box-shadow:none;white-space:nowrap;}
   .leaflet-container{cursor:grab;}
@@ -706,6 +708,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   <button class="btn" id="btnRedo" title="Вернуть">⏩</button>
 </div>
 <div id="toast"></div>
+<div id="ver"></div>
 
 <script>
 /* @preserve
@@ -812,6 +815,10 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 <script>
 // автообновление PWA: service worker отдаёт свежую версию при наличии интернета
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
+
+// отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
+const BUILD='14.06.2026 15:44';
+try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
