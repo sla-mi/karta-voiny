@@ -830,7 +830,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 17:44';
+const BUILD='14.06.2026 21:12';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1164,14 +1164,16 @@ function pickConnected(f, agg){
     const bb=turf.bbox(f), pad=0.7;
     let aggBuf=null;
     try{ const c=turf.bboxClip(agg,[bb[0]-pad,bb[1]-pad,bb[2]+pad,bb[3]+pad]); if(isPoly(c.geometry)) aggBuf=turf.buffer(c,5,{units:'kilometers'}); }catch(e){}
-    if(!aggBuf) return null;                        // агрессора рядом нет -> сомнение -> не заполняем
-    let best=null, bestA=-1;
+    let bestTouch=null, bestTouchA=-1, bestAny=null, bestAnyA=-1;
     for(const coords of polys){
       const piece={type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:coords}};
-      let t=false; try{ t=turf.booleanIntersects(piece,aggBuf); }catch(e){}
-      if(t){ let a=0; try{ a=turf.area(piece); }catch(e){} if(a>bestA){ bestA=a; best=piece; } }
+      let a=0; try{ a=turf.area(piece); }catch(e){}
+      if(a>bestAnyA){ bestAnyA=a; bestAny=piece; }
+      let t=false; try{ t=aggBuf?turf.booleanIntersects(piece,aggBuf):false; }catch(e){}
+      if(t && a>bestTouchA){ bestTouchA=a; bestTouch=piece; }
     }
-    return best;                                    // нет связанной части -> null
+    // примыкает к агрессору -> связная часть (фронт, без «ушей»); иначе -> крупнейшая (остров/оторванный кусок)
+    return bestTouch || bestAny;
   }catch(e){ return null; }
 }
 
