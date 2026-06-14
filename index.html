@@ -827,7 +827,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 17:28';
+const BUILD='14.06.2026 17:32';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1200,6 +1200,12 @@ function captureLasso(line, target){
   try{
     let ring=line.slice(); ring.push(ring[0]);
     let shape=cleanFill(turf.polygon([ring]));   // без повторного сглаживания (линия уже сглажена)
+    // образовалась ли НОРМАЛЬНАЯ замкнутая область (а не тонкая «линия»)? компактность площадь/периметр²
+    try{
+      const sa=turf.area(shape)/1e6;
+      const per=turf.length(turf.polygonToLine(shape),{units:'kilometers'});
+      if(!sa || !per || sa/(per*per) < 0.012) return null;   // слишком тонко -> замкнутой области нет
+    }catch(e){}
     let it=turf.intersect(shape, feat(target));
     if(it&&isPoly(it.geometry)) it=pickConnected(it, feat(active));   // связное с агрессором — без оторванных «окружений»
     return (it&&isPoly(it.geometry))?it:null;
