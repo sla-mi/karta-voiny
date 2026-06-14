@@ -703,6 +703,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
   <button class="btn on" id="btnSelect" title="Выбрать страну-агрессора">😡</button>
   <button class="btn" id="btnDraw" title="Война: рисовать новую границу">🤺</button>
   <button class="btn" id="btnUndo" title="Отменить">⏪</button>
+  <button class="btn" id="btnRedo" title="Вернуть">⏩</button>
 </div>
 <div id="toast"></div>
 
@@ -831,6 +832,7 @@ let state = {};          // name -> {geometry, color}
 let active = null;       // имя наступающей страны
 let mode = 'select';     // 'select' | 'draw'
 let history = [];        // стек для отмены (снимки state)
+let redo = [];           // стек для возврата (redo)
 let toastT=null;         // таймер всплывающей подсказки
 let layerGroup = L.layerGroup().addTo(map);
 let labelGroup = L.layerGroup().addTo(map);
@@ -908,18 +910,26 @@ function setMode(m){
   }
 }
 
-const btnUndo=document.getElementById('btnUndo');
+const btnUndo=document.getElementById('btnUndo'), btnRedo=document.getElementById('btnRedo');
 document.getElementById('btnReset').onclick=()=>{
   localStorage.removeItem('warmap');
-  buildState(window.EUROPE_GEOJSON); active=null; history=[]; render(); updateUndo();
+  buildState(window.EUROPE_GEOJSON); active=null; history=[]; redo=[]; render(); updateUndo();
 };
 btnUndo.onclick=()=>{
   if(!history.length) return;
-  try{ state=JSON.parse(history.pop()); render(); save(); }catch(e){}
+  try{ redo.push(JSON.stringify(state)); state=JSON.parse(history.pop()); render(); save(); }catch(e){}
   updateUndo();
 };
-function snapshot(){ try{ history.push(JSON.stringify(state)); if(history.length>30) history.shift(); }catch(e){} updateUndo(); }
-function updateUndo(){ btnUndo.disabled=!history.length; btnUndo.style.opacity=history.length?1:.45; }
+btnRedo.onclick=()=>{
+  if(!redo.length) return;
+  try{ history.push(JSON.stringify(state)); state=JSON.parse(redo.pop()); render(); save(); }catch(e){}
+  updateUndo();
+};
+function snapshot(){ try{ history.push(JSON.stringify(state)); if(history.length>50) history.shift(); }catch(e){} redo=[]; updateUndo(); }
+function updateUndo(){
+  btnUndo.disabled=!history.length; btnUndo.style.opacity=history.length?1:.45;
+  btnRedo.disabled=!redo.length;   btnRedo.style.opacity=redo.length?1:.45;
+}
 updateUndo();
 
 // ---- рисование контура мышкой ----
