@@ -699,6 +699,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
   .recitem{display:block;width:100%;border:0;background:#eef0f4;border-radius:8px;padding:8px 10px;
     margin:3px 0;font-size:13px;text-align:left;cursor:pointer;color:#222;}
   .recitem:hover{background:#e2e5ec;}
+  #stopPlay{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:1300;
+    background:rgba(20,20,20,.82);color:#fff;border:0;border-radius:12px;padding:10px 20px;
+    font-size:15px;font-weight:600;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.3);}
   .country-label{font-size:11px;font-weight:600;color:#222;text-shadow:0 0 3px #fff,0 0 3px #fff;
     background:none;border:none;box-shadow:none;white-space:nowrap;}
   .leaflet-container{cursor:grab;}
@@ -827,7 +830,7 @@ window.EUROPE_GEOJSON={"type":"FeatureCollection","features":[{"type":"Feature",
 if('serviceWorker' in navigator){ try{ navigator.serviceWorker.register('sw.js'); }catch(e){} }
 
 // отметка версии (дата/время сборки по Риге) — чтобы видеть, обновилось ли
-const BUILD='14.06.2026 17:32';
+const BUILD='14.06.2026 17:44';
 try{ document.getElementById('ver').textContent = (BUILD.indexOf('__')===0)?'' : ('верс. '+BUILD); }catch(e){}
 
 const map = L.map('map',{minZoom:2,maxZoom:11,zoomControl:false,worldCopyJump:true}).setView([25,10],2);
@@ -1012,28 +1015,35 @@ function toggleRecList(){
   renderRecList(); el.style.display='block';
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+let playStop=false;
 async function playRecording(rec){
   if(playing || !rec || !rec.moves || !rec.moves.length) return;
-  playing=true;
+  playing=true; playStop=false;
   const realState=JSON.stringify(state);
   const panel=document.querySelector('.panel');
   panel.style.display='none';                 // прячем панель — в кадре только смена границ
+  // кнопка «Стоп» + тап по карте останавливают проигрывание
+  const stopBtn=document.createElement('button'); stopBtn.id='stopPlay'; stopBtn.textContent='⏹ Стоп';
+  const doStop=()=>{ playStop=true; }; stopBtn.onclick=doStop;
+  document.body.appendChild(stopBtn); cont.addEventListener('pointerdown',doStop);
+  function cleanup(){ try{stopBtn.remove();}catch(e){} try{cont.removeEventListener('pointerdown',doStop);}catch(e){} }
   try{
     state=JSON.parse(rec.start); render(); await sleep(450);
-    for(let i=0;i<rec.moves.length;i++){
+    for(let i=0;i<rec.moves.length && !playStop;i++){
       const m=rec.moves[i], region={type:'Feature',properties:{},geometry:m.geom};
-      try{ const bb=turf.bbox(region); map.flyToBounds([[bb[1],bb[0]],[bb[3],bb[2]]],{duration:1.4, maxZoom:6, padding:[80,80]}); }catch(e){}
-      await sleep(1600);                       // даём камере плавно доехать
+      try{ const bb=turf.bbox(region); map.flyToBounds([[bb[1],bb[0]],[bb[3],bb[2]]],{duration:1.4, maxZoom:5, padding:[140,140]}); }catch(e){}  // зум слабее, больше контекста
+      await sleep(1600); if(playStop) break;   // даём камере плавно доехать
       applyMove(m);                            // коммит + медленное движение границы (2.5с)
-      await sleep(2800);                       // смакуем захват
+      await sleep(2800); if(playStop) break;   // смакуем захват
       if(i<rec.moves.length-1){
         let gap=rec.moves[i+1].ts - m.ts;
         gap=Math.max(150, Math.min(gap, 700)); // большие паузы пропускаем
         await sleep(gap);
       }
     }
-    await sleep(900);
+    if(!playStop) await sleep(900);
   }catch(e){}
+  cleanup();
   panel.style.display='';
   state=JSON.parse(realState); render();       // возвращаем карту как была
   playing=false;
@@ -1078,6 +1088,7 @@ function toLatLng(ev){
   return map.containerPointToLatLng([ev.clientX-r.left, ev.clientY-r.top]);
 }
 cont.addEventListener('pointerdown',ev=>{
+  if(playing) return;                       // во время проигрывания не рисуем (тап = стоп)
   if(mode!=='draw') return;                 // в режиме «Выбрать страну» — обычные жесты карты
   activePointers.add(ev.pointerId);
   if(activePointers.size>=2){                // второй палец → жест масштаб/перенос: рисование отменяем
@@ -1266,6 +1277,23 @@ function startCapture(target, region){
   let newAtk=null;
   try{ const m=turf.union(feat(active),absorbed); if(m&&isPoly(m.geometry)) newAtk=clean(m.geometry); }catch(e){}
   if(!newAtk){ hint('Не получилось присоединить зону — обведи иначе'); return; }
+
+  // поглощаем карманы жертвы, ОКРУЖЁННЫЕ агрессором (чтобы не было «окружённого противника» внутри)
+  if(newTgt && newTgt.type==='MultiPolygon'){
+    let atkFilled; try{ atkFilled=fillHoles(newAtk); }catch(e){ atkFilled=newAtk; }
+    const keep=[]; let swallowed=null;
+    for(const c of newTgt.coordinates){
+      const piece={type:'Feature',properties:{},geometry:{type:'Polygon',coordinates:c}};
+      let inside=false; try{ inside=turf.booleanWithin(piece,{type:'Feature',geometry:atkFilled}); }catch(e){}
+      if(inside){ try{ swallowed = swallowed?(turf.union(swallowed,piece)||swallowed):piece; }catch(e){ if(!swallowed) swallowed=piece; } }
+      else keep.push(c);
+    }
+    if(swallowed){
+      try{ const u=turf.union({type:'Feature',geometry:newAtk},swallowed); if(u&&isPoly(u.geometry)) newAtk=clean(u.geometry); }catch(e){}
+      try{ const u2=turf.union(absorbed,swallowed); if(u2&&isPoly(u2.geometry)) absorbed=u2; }catch(e){}
+      newTgt = keep.length ? (keep.length===1?{type:'Polygon',coordinates:keep[0]}:{type:'MultiPolygon',coordinates:keep}) : null;
+    }
+  }
 
   const victimColor=(state[target]&&state[target].color)||'#cfd3da';
   const atkBefore=feat(active);     // граница агрессора ДО присоединения (для анимации фронта)
